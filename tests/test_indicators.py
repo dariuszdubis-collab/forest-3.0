@@ -1,5 +1,4 @@
 ﻿import numpy as np
-
 from forest.core.indicators import ema
 
 
