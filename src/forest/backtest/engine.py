@@ -4,8 +4,19 @@ import numpy as np
 import pandas as pd
 
 from forest.backtest.risk import RiskManager
+from forest.backtest.trace import DecisionTrace
 from forest.backtest.tradebook import Trade, TradeBook
 from forest.core.indicators import atr, ema
+from forest.utils.log import setup_logger
+
+
+def test_trace_dict():
+    tr = DecisionTrace("2025-01-01", "EURUSD", {"atr": True}, "BUY")
+    assert tr.final == "BUY"
+    assert tr.filters["atr"] is True
+
+def test_setup_logger():
+    setup_logger("DEBUG")  # nie rzuca wyjątków
 
 
 def ema_cross_strategy(df: pd.DataFrame, fast: int = 10, slow: int = 30) -> pd.Series:
