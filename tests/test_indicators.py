@@ -1,5 +1,7 @@
 ﻿import numpy as np
+
 from forest.core.indicators import ema
+
 
 def test_ema_simple():
     data = np.arange(1, 11, dtype=float)  # [110]

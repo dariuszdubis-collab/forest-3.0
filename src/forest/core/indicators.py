@@ -1,5 +1,6 @@
 ﻿import numpy as np
 
+
 def ema(prices: np.ndarray, period: int) -> np.ndarray:
     """
     Calculate Exponential Moving Average for a 1D NumPy array.
