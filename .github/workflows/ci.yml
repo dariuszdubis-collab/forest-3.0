@@ -1,0 +1,36 @@
+﻿name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest   # twój projekt kompilujemy na Windows
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Poetry
+      uses: abatilo/actions-poetry@v2
+      with:
+        poetry-version: "1.8"
+
+    - name: Install dependencies
+      run: |
+        poetry install --with dev
+
+    - name: Ruff lint
+      run: |
+        poetry run ruff check src tests
+
+    - name: Pytest
+      run: |
+        poetry run pytest --cov=forest --cov-report=xml --cov-report=term
+
+    - name: Upload coverage to summary
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-xml
+        path: coverage.xml
