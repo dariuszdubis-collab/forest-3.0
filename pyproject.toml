@@ -5,7 +5,6 @@ description = "FOREST 3.0 trading system"
 authors = ["TwojeImię"]
 readme = "README.md"
 packages = [{ include = "forest", from = "src" }]
-python = "^3.11"                     # ← teraz klasyczny ASCII‑caret
 
 [tool.poetry.dependencies]
 python = "^3.11"
