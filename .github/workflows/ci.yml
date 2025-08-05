@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -8,29 +8,30 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest   # twój projekt kompilujemy na Windows
+    runs-on: windows-latest
+
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Poetry
-    - uses: abatilo/actions-poetry@v2
-      with: 
-      poetry-version: "2.1.3"
+      - name: Set up Poetry
+        uses: abatilo/actions-poetry@v2
+        with:
+          poetry-version: "2.1.3"     # ← ta linia ma 10 spacji wcięcia
 
-    - name: Install dependencies
-      run: |
-        poetry install --with dev
+      - name: Install dependencies
+        run: |
+          poetry install --with dev
 
-    - name: Ruff lint
-      run: |
-        poetry run ruff check src tests
+      - name: Ruff lint
+        run: |
+          poetry run ruff check src tests
 
-    - name: Pytest
-      run: |
-        poetry run pytest --cov=forest --cov-report=xml --cov-report=term
+      - name: Pytest
+        run: |
+          poetry run pytest --cov=forest --cov-report=xml --cov-report=term
 
-    - name: Upload coverage to summary
-      uses: actions/upload-artifact@v4
-      with:
-        name: coverage-xml
-        path: coverage.xml
+      - name: Upload coverage to summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
