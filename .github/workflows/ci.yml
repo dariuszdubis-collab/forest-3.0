@@ -29,7 +29,7 @@ jobs:
         shell: powershell
         run: |
          Invoke-WebRequest `
-          -Uri "https://download.lfd.uci.edu/pythonlibs/n5ngr7j8/TA_Lib-0.4.26‑cp311‑cp311‑win_amd64.whl" `
+          -Uri "https://pypi2.ricequant.com/packages/TA_Lib-0.4.26-cp311-cp311-win_amd64.whl#md5=19063062c573d8b914767fce2f77bd39" `
           -OutFile ta-lib.whl
          poetry run pip install ta-lib.whl
       
