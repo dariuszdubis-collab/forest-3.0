@@ -1,0 +1,13 @@
+﻿#  Python / Poetry 
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.venv/
+#  Test / coverage 
+htmlcov/
+coverage.xml
+#  Editors / OS 
+.idea/
+.vscode/
+.DS_Store
