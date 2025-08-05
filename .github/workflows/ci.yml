@@ -25,6 +25,14 @@ jobs:
         with:
           poetry-version: "2.1.3"
 
+      - name: Install pre‑built TA‑Lib wheel
+        shell: powershell
+        run: |
+         Invoke-WebRequest `
+          -Uri "https://download.lfd.uci.edu/pythonlibs/n5ngr7j8/TA_Lib-0.4.26‑cp311‑cp311‑win_amd64.whl" `
+          -OutFile ta-lib.whl
+         poetry run pip install ta-lib.whl
+      
       # ➌ Instalujemy zależności + pakiet
       - name: Install dependencies
         run: poetry install --with dev
