@@ -1,6 +1,5 @@
 """
-Testy modułu ParamGrid Runner.
-Zakładamy, że run_backtest przyjmuje parametry fast/slow EMA.
+Testy modułu ParamGrid Runner (fast/slow EMA).
 """
 
 import numpy as np
@@ -10,8 +9,10 @@ from forest.backtest.grid import param_grid, run_grid
 from forest.backtest.risk import RiskManager
 
 
+# ---------------------------------------------------------------------------#
+#  Syntetyczne ceny                                                          #
+# ---------------------------------------------------------------------------#
 def synthetic_prices(n: int = 50) -> pd.DataFrame:
-    """Mały DF OHLC z łagodnym trendem + stały spread 0.2."""
     base = np.linspace(100, 105, n)
     return pd.DataFrame(
         {
@@ -25,7 +26,7 @@ def synthetic_prices(n: int = 50) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------#
-#  Jednostkowe                                                                #
+#  Jednostkowe                                                               #
 # ---------------------------------------------------------------------------#
 def test_param_grid():
     grid = list(param_grid(fast=[5, 10], slow=[20, 30]))
@@ -34,24 +35,24 @@ def test_param_grid():
 
 
 # ---------------------------------------------------------------------------#
-#  Integracyjne – pojedynczy przebieg                                         #
+#  Grid – pojedyncza kombinacja (bez MP)                                     #
 # ---------------------------------------------------------------------------#
 def test_run_grid_small():
     df = synthetic_prices()
-    results = run_grid(
+    res = run_grid(
         df,
         param_grid(fast=[5], slow=[20]),
         make_risk=lambda: RiskManager(capital=1_000),
-        n_jobs=1,  # bez multiprocessing w CI
+        n_jobs=1,
     )
-    assert len(results) == 1
-    row = results.iloc[0]
+    assert len(res) == 1
+    row = res.iloc[0]
     assert row["equity_end"] > 0
     assert 0 <= row["max_dd"] <= 1
 
 
 # ---------------------------------------------------------------------------#
-#  Ten sam grid – wersja równoległa (n_jobs=1 w CI)                           #
+#  Grid – równolegle (CI: n_jobs=1)                                          #
 # ---------------------------------------------------------------------------#
 def test_run_grid_small_parallel():
     df = synthetic_prices()
@@ -59,7 +60,21 @@ def test_run_grid_small_parallel():
         df,
         param_grid(fast=[5], slow=[20]),
         make_risk=lambda: RiskManager(capital=1_000),
-        n_jobs=1,  # w CI trzymamy 1 proces, lokalnie można -1
+        n_jobs=1,            # w CI bez otwierania procesów
     )
     assert res.iloc[0]["equity_end"] > 0
+
+
+# ---------------------------------------------------------------------------#
+#  CAGR / RAR                                                                #
+# ---------------------------------------------------------------------------#
+def test_run_grid_rar():
+    df = synthetic_prices(30)
+    res = run_grid(
+        df,
+        param_grid(fast=[5], slow=[20]),
+        make_risk=lambda: RiskManager(capital=1_000),
+        n_jobs=1,
+    )
+    assert "rar" in res.columns and res.at[0, "rar"] >= 0
 
