@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 from dataclasses import asdict, dataclass
+from math import sqrt
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Tuple
 
@@ -14,42 +15,33 @@ from tqdm.auto import tqdm
 from forest.backtest.engine import run_backtest
 from forest.backtest.risk import RiskManager
 
-# ---------------------------------------------------------------------------#
-#  Persistent Joblib cache                                                   #
-# ---------------------------------------------------------------------------#
+# ---------------- persistent cache --------------------
 _CACHE_DIR = Path.home() / ".cache" / "forest_grid"
 _MEMORY = joblib.Memory(_CACHE_DIR, verbose=0)
 
-# ---------------------------------------------------------------------------#
-#  Wynik jednej symulacji                                                    #
-# ---------------------------------------------------------------------------#
+# ---------------- wynik pojedynczego przebiegu --------
 @dataclass(slots=True)
 class GridResult:
     params: Dict[str, Any]
     equity_end: float
     max_dd: float
     cagr: float
-    rar: float  # risk‑adjusted return = CAGR / max_dd
+    rar: float        # CAGR / max_dd
+    sharpe: float     # annualised Sharpe ratio
 
-# ---------------------------------------------------------------------------#
-#  Param-grid generator                                                      #
-# ---------------------------------------------------------------------------#
+# ---------------- generator kombinacji ----------------
 def param_grid(**param_ranges) -> Iterable[dict]:
     keys, values = zip(*param_ranges.items())
     for combo in itertools.product(*values):
         yield dict(zip(keys, combo))
 
-# ---------------------------------------------------------------------------#
-#  Hash danych OHLC → md5                                                    #
-# ---------------------------------------------------------------------------#
+# ---------------- hash OHLC ---------------------------
 def _hash_df(df: pd.DataFrame) -> str:
     h = hashlib.md5(pd.util.hash_pandas_object(df, index=True).values.tobytes())
     h.update(",".join(df.columns).encode())
     return h.hexdigest()
 
-# ---------------------------------------------------------------------------#
-#  Pojedynczy przebieg (cached)                                              #
-# ---------------------------------------------------------------------------#
+# ---------------- base calculation (cached) -----------
 @_MEMORY.cache(ignore=["df", "make_risk"])
 def _single_run_cached(
     df_hash: str,
@@ -63,20 +55,29 @@ def _single_run_cached(
     rm = make_risk()
     res = run_backtest(df, rm, fast, slow)
 
-    equity_end = float(res["equity"].iloc[-1])
-    dd = (res["equity"].cummax() - res["equity"]) / res["equity"].cummax()
+    equity = res["equity"]
+    equity_end = float(equity.iloc[-1])
+
+    dd = (equity.cummax() - equity) / equity.cummax()
     max_dd = float(dd.max())
 
+    # CAGR
     days = (res.index[-1] - res.index[0]).days or 1
     years = days / 365.25
     cagr = (equity_end / rm.capital) ** (1 / years) - 1 if years > 0 else 0.0
     rar = cagr / max_dd if max_dd > 0 else 0.0
 
-    return GridResult(p, equity_end, max_dd, cagr, rar)
+    # Sharpe – dzienne zmiany equity
+    rets = equity.pct_change().dropna()
+    sharpe = (
+        sqrt(252) * rets.mean() / rets.std()
+        if not rets.empty and rets.std() != 0
+        else 0.0
+    )
 
-# ---------------------------------------------------------------------------#
-#  Główny runner                                                             #
-# ---------------------------------------------------------------------------#
+    return GridResult(p, equity_end, max_dd, cagr, rar, sharpe)
+
+# ---------------- main runner -------------------------
 def run_grid(
     df: pd.DataFrame,
     grid: Iterable[dict],
@@ -85,27 +86,22 @@ def run_grid(
     export_path: str | Path | None = None,
     use_cache: bool = True,
 ) -> pd.DataFrame:
-    """Batch back‑test z multiprocessing i persistent cache."""
     make_risk = make_risk or (lambda: RiskManager(capital=10_000))
-    grid_list: List[dict] = list(grid)
     df_hash = _hash_df(df)
+    grid_list: List[dict] = list(grid)
 
-    # funkcja robocza (def zamiast lambda – Ruff E731)
-    def _worker(params: dict) -> GridResult:
+    def _worker(params: dict):
         key = tuple(sorted(params.items()))
         if use_cache:
             return _single_run_cached(df_hash, key, df, make_risk)
-        # .call() → pomija cache
         return _single_run_cached.call(df_hash, key, df, make_risk)
 
     iterator = tqdm(grid_list, desc="ParamGrid", leave=False)
-
-    if n_jobs == 1:
-        results = [_worker(p) for p in iterator]
-    else:
-        results = Parallel(n_jobs=n_jobs)(
-            delayed(_worker)(p) for p in iterator
-        )
+    results = (
+        [_worker(p) for p in iterator]
+        if n_jobs == 1
+        else Parallel(n_jobs=n_jobs)(delayed(_worker)(p) for p in iterator)
+    )
 
     out = pd.DataFrame([asdict(r) for r in results])
 
@@ -117,7 +113,7 @@ def run_grid(
         elif export_path.suffix == ".csv":
             out.to_csv(export_path, index=False)
         else:
-            raise ValueError("export_path musi mieć rozszerzenie .parquet lub .csv")
+            raise ValueError("export_path musi kończyć się .parquet lub .csv")
 
     return out
 
