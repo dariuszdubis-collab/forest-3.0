@@ -18,59 +18,81 @@ log = structlog.get_logger()
 #  Strategie                                                                 #
 # ---------------------------------------------------------------------------#
 def ema_cross_strategy(df: pd.DataFrame, fast: int = 10, slow: int = 30) -> pd.Series:
-    """Sygnał: 1 = LONG, -1 = SHORT, 0 = brak sygnału (przed wypełnieniem historii)."""
-    fast_ma = ema(df["close"].to_numpy(), fast)
-    slow_ma = ema(df["close"].to_numpy(), slow)
-    signal = np.where(fast_ma > slow_ma, 1, -1)
-    signal[: slow] = 0
-    return pd.Series(signal, index=df.index, name="signal")
+    sig = np.where(ema(df["close"].to_numpy(), fast) > ema(df["close"].to_numpy(), slow), 1, -1)
+    sig[: slow] = 0
+    return pd.Series(sig, index=df.index, name="signal")
 
 
 # ---------------------------------------------------------------------------#
 #  Back‑tester                                                               #
 # ---------------------------------------------------------------------------#
 def run_backtest(df: pd.DataFrame, risk: RiskManager) -> pd.DataFrame:
-    """Uruchamia wektorowy back‑test na DataFrame świec."""
     out = df.copy()
-
-    # 1. sygnał strategii
     out["signal"] = ema_cross_strategy(df)
-
-    # 2. ATR do position sizingu
     out["atr"] = atr(df["high"], df["low"], df["close"], period=14)
 
     tb = TradeBook()
 
+    position: int | None = None        # 1 LONG, -1 SHORT, None = flat
+    entry_price: float | None = None
+    entry_qty: float | None = None
+
     for idx, row in out.iterrows():
-        if row.signal == 0:
-            continue
+        sig = int(row.signal)
 
-        qty = risk.position_size(row.atr)
-        if qty == 0:
-            continue
+        # ---------- trailing‑SL aktualizacja i ewentualne zamknięcie ----------
+        if position is not None:
+            risk.update_trailing_sl(row.close, row.atr)
+            if risk.hit_trailing_sl(row.close):
+                pnl = (row.close - entry_price) * position * entry_qty
+                cost = risk.position_cost(entry_qty, row.close)
+                risk.record_trade(pnl - cost)
+                tb.add(Trade(idx, row.close, entry_qty, "LONG" if position == 1 else "SHORT"))
+                log.warning("trailing_sl_hit", time=str(idx), price=row.close)
+                position = entry_price = entry_qty = None
+                break                                            # kończymy back‑test
 
-        side = "LONG" if row.signal == 1 else "SHORT"
-        tb.add(Trade(time=idx, price=row.close, qty=qty, side=side))
+        # ---------- zmiana sygnału ⇒ zamknięcie starej + otwarcie nowej ----------
+        if sig != 0 and sig != position:
+            # zamknij starą pozycję (jeśli była)
+            if position is not None:
+                pnl = (row.close - entry_price) * position * entry_qty
+                cost = risk.position_cost(entry_qty, row.close)
+                risk.record_trade(pnl - cost)
+                tb.add(Trade(idx, row.close, entry_qty, "LONG" if position == 1 else "SHORT"))
 
-        # zaksięguj PnL
-        sign = 1 if side == "LONG" else -1
-        risk.record_trade(sign * qty * row.close)
+            # otwórz nową pozycję
+            qty = risk.position_size(row.atr)
+            if qty == 0:
+                continue
 
-        # DecisionTrace + log (JSON)
-        trace = DecisionTrace(
-            time=str(idx),
-            symbol="SYN",
-            filters={"atr_ok": qty > 0},
-            final="BUY" if side == "LONG" else "SELL",
-        )
-        log.info("decision", **asdict(trace))
+            cost = risk.position_cost(qty, row.close)
+            risk.record_trade(-cost)              # pobierz koszty otwarcia
+            tb.add(Trade(idx, row.close, qty, "LONG" if sig == 1 else "SHORT"))
 
-        # globalny stop, jeśli max DD przekroczone
-        if risk.exceeded_max_dd():
-            log.warning("max_dd_reached", equity=risk.equity)
-            break
+            position, entry_price, entry_qty = sig, row.close, qty
 
-    # 3. equity curve uzupełniona do pełnej długości df
+            trace = DecisionTrace(
+                time=str(idx),
+                symbol="SYN",
+                filters={"atr_ok": qty > 0},
+                final="BUY" if sig == 1 else "SELL",
+            )
+            log.info("decision", **asdict(trace))
+
+            if risk.exceeded_max_dd():
+                log.error("max_dd_reached", equity=risk.equity)
+                break
+
+    # ---------- zamknięcie pozycji na końcu danych ----------
+    if position is not None:
+        last_idx = out.index[-1]
+        last_price = out["close"].iloc[-1]
+        pnl = (last_price - entry_price) * position * entry_qty
+        cost = risk.position_cost(entry_qty, last_price)
+        risk.record_trade(pnl - cost)
+        tb.add(Trade(last_idx, last_price, entry_qty, "LONG" if position == 1 else "SHORT"))
+
     out["equity"] = tb.equity_curve().reindex(out.index).ffill()
     return out
 
