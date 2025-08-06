@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Dict, Iterable
+from typing import Any, Callable, Dict, Iterable, List
 
 import pandas as pd
+from joblib import Parallel, delayed
 from tqdm.auto import tqdm
 
 from forest.backtest.engine import run_backtest
@@ -25,22 +26,50 @@ def param_grid(**param_ranges) -> Iterable[dict]:
         yield dict(zip(keys, combo))
 
 
+# ---------------------------------------------------------------------------#
+#  Wersja wektorowa + Parallel joblib                                        #
+# ---------------------------------------------------------------------------#
+def _single_run(df: pd.DataFrame, params: dict, make_risk: Callable[[], RiskManager]) -> GridResult:
+    fast, slow = params["fast"], params["slow"]
+    res = run_backtest(df, make_risk(), fast, slow)
+
+    equity_end = res["equity"].iloc[-1]
+    dd = (res["equity"].cummax() - res["equity"]) / res["equity"].cummax()
+    return GridResult(params, float(equity_end), float(dd.max()))
+
+
 def run_grid(
     df: pd.DataFrame,
     grid: Iterable[dict],
     make_risk: Callable[[], RiskManager] | None = None,
+    n_jobs: int | None = -1,
 ) -> pd.DataFrame:
-    """Uruchamia back‑test dla każdej kombinacji; zwraca DataFrame wyników."""
-    records: list[GridResult] = []
+    """Uruchamia back‑test w równoległych procesach.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Dane OHLC.
+    grid : iterable of dict
+        Kombinacje parametrów.
+    make_risk : callable
+        Funkcja generująca świeży obiekt RiskManager dla każdego przebiegu.
+    n_jobs : int
+        Liczba procesów (‑1 = wszystkie CPU, 1 = bez multiprocessing).
+
+    Returns
+    -------
+    DataFrame
+        Kolumny: params, equity_end, max_dd
+    """
     make_risk = make_risk or (lambda: RiskManager(capital=10_000))
+    grid_list: List[dict] = list(grid)
 
-    for params in tqdm(list(grid), desc="Param grid"):
-        # w tej wersji zmieniamy tylko okresy EMA
-        fast, slow = params["fast"], params["slow"]
-        res = run_backtest(df, make_risk(), fast, slow)
+    if n_jobs == 1:
+        results = [_single_run(df, p, make_risk) for p in tqdm(grid_list, desc="Param grid")]
+    else:
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(_single_run)(df, params, make_risk) for params in tqdm(grid_list, desc="Param grid")
+        )
 
-        equity_end = res["equity"].iloc[-1]
-        dd = (res["equity"].cummax() - res["equity"]) / res["equity"].cummax()
-        records.append(GridResult(params, equity_end, dd.max()))
-
-    return pd.DataFrame([asdict(r) for r in records])
+    return pd.DataFrame([asdict(r) for r in results])
