@@ -1,6 +1,8 @@
-"""Pakiet narzędzi pomocniczych (logger, timing, config…)."""
+"""Pomoce narzędziowe Forest 3.0 (log, helpers, …)."""
 
-from .log import setup_logger
+from __future__ import annotations
 
-__all__: list[str] = ["setup_logger"]
+from .log import log, setup_logger  # re‑eksport dla wygody
+
+__all__ = ["log", "setup_logger"]
 

@@ -1,116 +1,129 @@
+"""Wektorowy back‑tester strategii EMA‑cross (lub opcjonalnie ML‑modelu)."""
 from __future__ import annotations
 
-from dataclasses import asdict
-from typing import Final
+from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import pandas as pd
-import structlog
 
 from forest.backtest.risk import RiskManager
 from forest.backtest.trace import DecisionTrace
 from forest.backtest.tradebook import Trade, TradeBook
-from forest.core.indicators import atr, ema
+from forest.core.indicators import atr, ema_cross_strategy
+from forest.utils.log import log
 
-log: Final = structlog.get_logger()
+# --------------------------------------------------------------------------- #
+#  Typ opcjonalnego modelu ML – pozwala zachować typowanie bez extras[ml].
+# --------------------------------------------------------------------------- #
+if TYPE_CHECKING:  # pragma: no cover
+    from forest.ml.infer import ONNXModel  # noqa: N811 – import tylko dla Mypy
+else:
+    ONNXModel = Any  # type: ignore
 
-
-# ---------------------------------------------------------------------------#
-#  Strategia: EMA‑cross                                                      #
-# ---------------------------------------------------------------------------#
-def ema_cross_strategy(
-    df: pd.DataFrame,
-    fast: int = 10,
-    slow: int = 30,
-) -> pd.Series:
-    """1 = LONG, −1 = SHORT, 0 = brak sygnału (przed wypełnieniem historii)."""
-    fast_ma = ema(df["close"].to_numpy(), fast)
-    slow_ma = ema(df["close"].to_numpy(), slow)
-    sig = np.where(fast_ma > slow_ma, 1, -1)
-    sig[: slow] = 0
-    return pd.Series(sig, index=df.index, name="signal")
+# --------------------------------------------------------------------------- #
+#  Pomocnicza funkcja zamykająca pozycję (DRY).
+# --------------------------------------------------------------------------- #
 
 
-# ---------------------------------------------------------------------------#
-#  Back‑tester                                                               #
-# ---------------------------------------------------------------------------#
+def _close_open_position(
+    tb: TradeBook,
+    risk: RiskManager,
+    when: pd.Timestamp,
+    price: float,
+    side: int,
+    qty: float,
+    entry_price: float,
+) -> None:
+    pnl = (price - entry_price) * side * qty
+    cost = risk.position_cost(qty, price)
+    risk.record_trade(pnl - cost)
+    tb.add(Trade(when, price, qty, "LONG" if side == 1 else "SHORT"))
+
+
+# --------------------------------------------------------------------------- #
+#  Główna pętla back‑testera.
+# --------------------------------------------------------------------------- #
+
+
 def run_backtest(
     df: pd.DataFrame,
     risk: RiskManager,
-    fast: int = 10,
-    slow: int = 30,
+    model: "ONNXModel | None" = None,  # noqa: N803 – opcjonalny model
+    ml_threshold: float = 0.55,
 ) -> pd.DataFrame:
-    """Wektorowy back‑test EMA‑cross + RiskManager v‑2 (trailing SL, koszty)."""
+    """Back‑test strategii: EMA‑cross lub (jeśli podano) modelu ML."""
     out = df.copy()
 
-    # 1. sygnał strategii
-    out["signal"] = ema_cross_strategy(df, fast, slow)
+    # ───────────────── 1) SYGNAŁ STRATEGII ──────────────────────────────────
+    if model is not None:
+        # lazy‑import, żeby core‑CI działało bez extras[ml]
+        if TYPE_CHECKING:  # pragma: no cover
+            from forest.strategy.ml_runner import ml_signal
+        else:  # pragma: no cover
+            from forest.strategy.ml_runner import ml_signal  # type: ignore
 
-    # 2. ATR do position sizingu
+        from forest.strategy.features import build_features  # lokalny import
+
+        feats = build_features(df)  # type: ignore[arg-type]
+        out["signal"] = ml_signal(model, feats, threshold=ml_threshold)
+    else:
+        out["signal"] = ema_cross_strategy(df)
+
+    # ───────────────── 2) ATR do sizingu ────────────────────────────────────
     out["atr"] = atr(df["high"], df["low"], df["close"], period=14)
 
+    # ───────────────── 3) Pętla zdarzeń tick‑po‑tick ───────────────────────
     tb = TradeBook()
-
-    position: int | None = None        # 1 LONG, −1 SHORT
+    position: int | None = None
     entry_price: float | None = None
     entry_qty: float | None = None
 
     for idx, row in out.iterrows():
         sig = int(row.signal)
 
-        # ---------- trailing‑SL aktualizacja i ewentualne zamknięcie ----------
+        # trailing‑SL ‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑
         if position is not None:
             risk.update_trailing_sl(row.close, row.atr)
             if risk.hit_trailing_sl(row.close):
-                pnl = (row.close - entry_price) * position * entry_qty
-                cost = risk.position_cost(entry_qty, row.close)
-                risk.record_trade(pnl - cost)
-                tb.add(Trade(idx, row.close, entry_qty, "LONG" if position == 1 else "SHORT"))
+                _close_open_position(tb, risk, idx, row.close, position, entry_qty, entry_price)
                 log.warning("trailing_sl_hit", time=str(idx), price=row.close)
                 position = entry_price = entry_qty = None
-                break
+                continue  # kontynuujemy test dalej (nie przerywamy)
 
-        # ---------- zmiana sygnału ⇒ zamknięcie starej + otwarcie nowej ----------
+        # zmiana kierunku / otwarcie pozycji ‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑
         if sig != 0 and sig != position:
-            # zamknij starą (jeśli była)
+            # zamknięcie starej (jeśli istniała)
             if position is not None:
-                pnl = (row.close - entry_price) * position * entry_qty
-                cost = risk.position_cost(entry_qty, row.close)
-                risk.record_trade(pnl - cost)
-                tb.add(Trade(idx, row.close, entry_qty, "LONG" if position == 1 else "SHORT"))
+                _close_open_position(tb, risk, idx, row.close, position, entry_qty, entry_price)
 
-            # otwórz nową
+            # otwarcie nowej
             qty = risk.position_size(row.atr)
-            if qty == 0:
+            if qty == 0:  # ATR zbyt duży ⇒ pomijamy sygnał
                 continue
 
-            cost_open = risk.position_cost(qty, row.close)
-            risk.record_trade(-cost_open)
+            position = sig
+            entry_price = row.close
+            entry_qty = qty
             tb.add(Trade(idx, row.close, qty, "LONG" if sig == 1 else "SHORT"))
 
-            position, entry_price, entry_qty = sig, row.close, qty
+        # log ścieżki decyzyjnej (debug) ‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑
+        trace = DecisionTrace(
+            time=str(idx),
+            symbol="SYN",
+            filters={"atr_ok": row.atr > 0},
+            final={1: "BUY", -1: "SELL"}.get(sig, "WAIT"),
+        )
+        log.info("decision", **trace.as_dict())  # type: ignore[arg-type]
 
-            trace = DecisionTrace(
-                time=str(idx),
-                symbol="SYN",
-                filters={"atr_ok": qty > 0},
-                final="BUY" if sig == 1 else "SELL",
-            )
-            log.info("decision", **asdict(trace))
-
-            if risk.exceeded_max_dd():
-                log.error("max_dd_reached", equity=risk.equity)
-                break
-
-    # ---------- zamknięcie pozycji na końcu danych ----------
+    # jeżeli coś nadal otwarte – zamyka się na ostatniej świecy
     if position is not None:
-        last_idx = out.index[-1]
-        last_price = out["close"].iloc[-1]
-        pnl = (last_price - entry_price) * position * entry_qty
-        cost_close = risk.position_cost(entry_qty, last_price)
-        risk.record_trade(pnl - cost_close)
-        tb.add(Trade(last_idx, last_price, entry_qty, "LONG" if position == 1 else "SHORT"))
+        _close_open_position(
+            tb, risk, out.index[-1], out.close.iat[-1], position, entry_qty, entry_price
+        )
 
-    out["equity"] = tb.equity_curve().reindex(out.index).ffill()
+    # ───────────────── 4) Equity curve (bez duplikatów) ─────────────────────
+    ec = tb.equity_curve()
+    ec = ec[~ec.index.duplicated(keep="last")]
+    out["equity"] = ec.reindex(out.index).ffill()
+
     return out
 
