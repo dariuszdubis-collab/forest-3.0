@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+
 from forest.utils.timeframes import normalize_timeframe, to_minutes
 
 
