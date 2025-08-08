@@ -18,6 +18,8 @@ streamlit = "^1.35.0"
 plotly     = "^5.22.0"
 tqdm = "^4.66.4"
 joblib = "^1.5.1"
+pydantic = ">=2.7,<3.0"
+pyyaml = ">=6.0.2,<7.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.12.7"
@@ -32,9 +34,13 @@ build-backend = "poetry.core.masonry.api"
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+src = ["src"] 
 
 [tool.ruff.lint]
 extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["forest"]
 
 [tool.poetry.scripts]
 forest-dashboard = "forest.dashboard.app:main"
