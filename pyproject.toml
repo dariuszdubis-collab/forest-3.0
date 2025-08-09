@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "forest"
-version = "0.1.0"
+version = "0.1.1"
 description = "FOREST 3.0 trading system"
 authors = ["Dariusz Dubis"]
 readme = "README.md"
