@@ -1,3 +1,4 @@
+# src/forest/backtest/grid.py
 from __future__ import annotations
 
 import hashlib
@@ -19,6 +20,7 @@ from forest.backtest.risk import RiskManager
 _CACHE_DIR = Path.home() / ".cache" / "forest_grid"
 _MEMORY = joblib.Memory(_CACHE_DIR, verbose=0)
 
+
 # ---------------- wynik pojedynczego przebiegu ----------------
 @dataclass(slots=True)
 class GridResult:
@@ -26,16 +28,18 @@ class GridResult:
     equity_end: float
     max_dd: float
     cagr: float
-    rar: float        # CAGR / max_dd
-    sharpe: float     # annualised Sharpe ratio
+    rar: float  # CAGR / max_dd
+    sharpe: float  # annualised Sharpe ratio
 
-# ---------------- generator kombinacji parametrów ----------------
+
+# ---------------- generator kombinacji parametrów -------------------
 def param_grid(**param_ranges) -> Iterable[dict]:
     """Generuje listę słowników ze wszystkimi kombinacjami parametrów (pełna siatka)."""
-    # Zapewnij deterministyczną kolejność poprzez sortowanie kluczy
+    # deterministyczna kolejność kluczy
     keys, values = zip(*sorted(param_ranges.items()))
     for combo in itertools.product(*values):
         yield dict(zip(keys, combo))
+
 
 # ---------------- funkcja pomocnicza: hash danych OHLC -------------------
 def _hash_df(df: pd.DataFrame) -> str:
@@ -43,6 +47,7 @@ def _hash_df(df: pd.DataFrame) -> str:
     h = hashlib.md5(pd.util.hash_pandas_object(df, index=True).values.tobytes())
     h.update(",".join(df.columns).encode())
     return h.hexdigest()
+
 
 # ---------------- pojedynczy bieg symulacji (z cache) --------------------
 @_MEMORY.cache(ignore=["df", "make_risk"])
@@ -69,17 +74,19 @@ def _single_run_cached(
     days = (res.index[-1] - res.index[0]).days or 1
     years = days / 365.25
     cagr = (equity_end / rm.capital) ** (1 / years) - 1 if years > 0 else 0.0
+
     rar = cagr / max_dd if max_dd > 0 else 0.0
 
     # Sharpe – na podstawie dziennych zmian equity
-    rets = equity.pct_change().dropna()
-    sharpe = (
-        sqrt(252) * rets.mean() / rets.std()
-        if not rets.empty and rets.std() != 0
-        else 0.0
-    )
+    # Uwaga: fill_method=None usuwa FutureWarning z Pandas 2.x
+    rets = equity.pct_change(fill_method=None).dropna()
+    if not rets.empty and rets.std() != 0:
+        sharpe = sqrt(252) * rets.mean() / rets.std()
+    else:
+        sharpe = 0.0
 
     return GridResult(p, equity_end, max_dd, cagr, rar, sharpe)
+
 
 # ---------------- główna funkcja grid search -------------------------
 def run_grid(
@@ -95,10 +102,10 @@ def run_grid(
     Zwraca DataFrame z wynikami (metryki dla każdej kombinacji).
     """
     make_risk = make_risk or (lambda: RiskManager(capital=10_000))
-    # Oblicz hash danych wejściowych
+
+    # Oblicz hash danych + dołącz parametry RiskManager, aby uniknąć kolizji cache
     df_hash = _hash_df(df)
-    # Dołącz parametry RiskManager do klucza cache, aby uniknąć kolizji między różnymi ustawieniami ryzyka
-    test_rm = make_risk()  # tymczasowa instancja, by pobrać parametry
+    test_rm = make_risk()
     risk_key = f"{test_rm.capital}_{test_rm.risk_per_trade}_{test_rm.max_drawdown}"
     df_hash = f"{df_hash}_{risk_key}"
 
@@ -115,8 +122,8 @@ def run_grid(
     # Uruchom backtesty sekwencyjnie lub równolegle w zależności od n_jobs
     iterator = tqdm(grid_list, desc="ParamGrid", leave=False)
     results = (
-        [_worker(p) for p in iterator] 
-        if n_jobs == 1 
+        [_worker(p) for p in iterator]
+        if n_jobs == 1
         else Parallel(n_jobs=n_jobs)(delayed(_worker)(p) for p in iterator)
     )
 
