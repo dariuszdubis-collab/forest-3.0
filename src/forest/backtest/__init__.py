@@ -1,21 +1,8 @@
-"""
-Sub‑pakiet `forest.backtest`
-===========================
-
-Udostępnia najważniejsze klasy i funkcje back‑testu, tak aby można
-było je importować jednym krótkim łańcuchem:
-
-    from forest.backtest import Trade, TradeBook, RiskManager, run_backtest
-"""
-
+# src/forest/backtest/__init__.py
 from .engine import run_backtest
 from .risk import RiskManager
+from .trace import DecisionTrace
 from .tradebook import Trade, TradeBook
 
-__all__: list[str] = [
-    "Trade",
-    "TradeBook",
-    "RiskManager",
-    "run_backtest",
-]
+__all__ = ["run_backtest", "RiskManager", "Trade", "TradeBook", "DecisionTrace"]
 
