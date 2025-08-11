@@ -35,8 +35,8 @@ jobs:
         run: poetry config virtualenvs.create false
 
       # ⬇⬇⬇ najważniejsze: NIE instalujemy grupy dev (czyli nie instalujemy pre-commit)
-      - name: Install project dependencies (skip dev)
-        run: poetry install --no-interaction --no-ansi --without dev
+      - name: Install project dependencies (main + ci)
+        run: poetry install --no-interaction --no-ansi --only main --with ci
 
       # narzędzia CI doinstalowujemy przez pip (ruff, pytest, mypy)
       - name: Install CI tools
