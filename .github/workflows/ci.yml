@@ -53,10 +53,12 @@ jobs:
             echo "No dependency file found"; exit 1
           fi
 
-      - name: Run pre-commit (ruff, itd.)
+      # 👉 NIE używamy pre-commit w CI (unikanie buga virtualenv).
+      #    Linty odpalamy bezpośrednio.
+      - name: Lint (ruff)
         run: |
-          python -m pip install pre-commit
-          pre-commit run --all-files --show-diff-on-failure
+          poetry run python -m pip install ruff
+          poetry run ruff check .
 
       - name: Type check (mypy)
         run: |
