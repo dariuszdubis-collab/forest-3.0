@@ -1,82 +1,101 @@
-"""RiskManager – zarządzanie wielkością pozycji i ryzykiem.
-
-v‑2:
-* ATR‑position sizing  (jak w v‑1)
-* globalny max DD guard
-* trailing SL (Chandelier)
-* symulacja kosztów transakcyjnych: spread + commission + slippage
-"""
-
 from __future__ import annotations
-
-from dataclasses import dataclass
-
-import pandas as pd
+from typing import Optional
 
 
-@dataclass(slots=True)
 class RiskManager:
-    capital: float
-    risk_per_trade: float = 0.01         # 1 % equity
-    max_drawdown: float = 0.20           # 20 % DD absolutny
-
-    _equity_curve: list[float] | None = None
-    _trail: float | None = None          # trailing SL
-
-    # ------------------------------------------------------------------ #
-    #  Position sizing                                                   #
-    # ------------------------------------------------------------------ #
-    def position_size(self, atr: float, atr_multiple: float = 2.0) -> float:
-        """Lot size = (equity * risk%) / (ATR * atr_multiple)."""
-        if atr <= 0:
-            return 0.0
-        dollar_risk = self.equity * self.risk_per_trade
-        return dollar_risk / (atr * atr_multiple)
-
-    # ------------------------------------------------------------------ #
-    #  Trailing Stop (Chandelier)                                        #
-    # ------------------------------------------------------------------ #
-    def update_trailing_sl(self, price: float, atr: float, k: float = 3.0) -> None:
-        """Podciąga trailing SL tylko w kierunku zysku."""
-        new_trail = price - k * atr
-        if self._trail is None or new_trail > self._trail:
-            self._trail = new_trail
-
-    def hit_trailing_sl(self, price: float) -> bool:
-        """Czy cena dotknęła trailing SL?"""
-        return self._trail is not None and price < self._trail
-
-    # ------------------------------------------------------------------ #
-    #  Transaction costs                                                 #
-    # ------------------------------------------------------------------ #
-    def position_cost(
+    """
+    Zarządzanie ryzykiem i krzywą kapitału.
+    - position_size: wielkość pozycji wg: (risk% * equity) / (ATR * atr_multiple)
+    - trailing SL: reset/update/hit
+    - record_trade: aktualizacja equity po zamknięciu pozycji, z kosztami transakcyjnymi
+    """
+    def __init__(
         self,
-        qty: float,
-        price: float,
-        spread: float = 0.0002,          # 2 pipette przy cenie 1.0000
-        commission: float = 0.0005,      # 5 pipette round‑turn
-        slippage: float = 0.0001,        # dodatkowy poślizg
-    ) -> float:
-        pct = spread + commission + slippage
-        return qty * price * pct
+        initial_capital: float = 100_000.0,
+        risk_per_trade: float = 0.01,
+        max_drawdown: float = 0.25,
+        fee_perc: float = 0.0005,        # prowizja 5 bps
+        spread_perc: float = 0.0,
+        slippage_perc: float = 0.0,
+    ) -> None:
+        self.initial_capital = float(initial_capital)
+        self.risk_per_trade = float(risk_per_trade)
+        self.max_drawdown = float(max_drawdown)
+        self.fee_perc = float(fee_perc)
+        self.spread_perc = float(spread_perc)
+        self.slippage_perc = float(slippage_perc)
 
-    # ------------------------------------------------------------------ #
-    #  Equity tracking                                                   #
-    # ------------------------------------------------------------------ #
-    def record_trade(self, pnl: float) -> None:
-        if self._equity_curve is None:
-            self._equity_curve = [self.capital + pnl]
-        else:
-            self._equity_curve.append(self._equity_curve[-1] + pnl)
+        self._equity_curve = [self.initial_capital]
+        self._trail: Optional[float] = None  # poziom trailing stop dla long
+
+    # --- Equity / DD ---
 
     @property
     def equity(self) -> float:
-        return self._equity_curve[-1] if self._equity_curve else self.capital
+        return float(self._equity_curve[-1])
 
     def exceeded_max_dd(self) -> bool:
-        if not self._equity_curve:
+        peak = max(self._equity_curve) if self._equity_curve else self.initial_capital
+        if peak <= 0:
             return False
-        series = pd.Series(self._equity_curve, dtype="float64")
-        drawdown = series.cummax() - series
-        return bool((drawdown / series.cummax()).max() >= self.max_drawdown)
+        dd = (peak - self.equity) / peak
+        return dd >= (self.max_drawdown - 1e-12)
+
+    # --- Koszty / pozycja ---
+
+    def position_cost(self, notional: float) -> float:
+        """Łączny koszt transakcyjny jako % wartości zlecenia (fee+spread+slippage)."""
+        rate = self.fee_perc + self.spread_perc + self.slippage_perc
+        return float(notional) * float(rate)
+
+    def position_size(self, price: float, atr: Optional[float], atr_multiple: float = 2.0) -> float:
+        """
+        Wielkość pozycji long: (risk% * equity) / (ATR * atr_multiple)
+        Zwraca 0.0, jeśli ATR niegotowy lub parametry niepoprawne.
+        """
+        if atr is None or not (atr > 0) or price <= 0:
+            return 0.0
+        risk_dollars = self.risk_per_trade * self.equity
+        risk_per_unit = float(atr_multiple) * float(atr)
+        if risk_per_unit <= 0:
+            return 0.0
+        qty = risk_dollars / risk_per_unit
+        return float(qty) if qty > 0 else 0.0
+
+    # --- Trailing stop (long) ---
+
+    def reset_trailing_sl(self, current_price: float, atr: Optional[float], atr_multiple: float = 2.0) -> None:
+        """Ustaw początkowy trailing SL w oparciu o cenę i ATR."""
+        if atr is None or not (atr > 0):
+            self._trail = None
+            return
+        self._trail = float(current_price) - float(atr_multiple) * float(atr)
+
+    def update_trailing_sl(self, current_price: float, atr: Optional[float], atr_multiple: float = 2.0) -> None:
+        """Podnoś trailing SL tylko w górę, gdy cena idzie na naszą korzyść (long)."""
+        if atr is None or not (atr > 0):
+            return
+        candidate = float(current_price) - float(atr_multiple) * float(atr)
+        if self._trail is None:
+            self._trail = candidate
+        else:
+            self._trail = max(self._trail, candidate)
+
+    def hit_trailing_sl(self, price: float) -> bool:
+        """Czy aktualna cena przebiła trailing SL (dla pozycji long)?"""
+        return self._trail is not None and float(price) <= float(self._trail)
+
+    # --- Rejestracja transakcji ---
+
+    def record_trade(self, entry: float, exit: float, qty: float) -> None:
+        """
+        Zapisz realizację transakcji (zamknięcie pozycji) i zaktualizuj equity (z kosztami).
+        Koszty naliczane po obu stronach: entry i exit.
+        """
+        gross = (float(exit) - float(entry)) * float(qty)
+        cost = self.position_cost(float(entry) * float(qty)) + self.position_cost(float(exit) * float(qty))
+        pnl = gross - cost
+        self._equity_curve.append(self.equity + pnl)
+        # po zamknięciu pozycji resetujemy trailing
+        self._trail = None
 

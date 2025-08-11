@@ -1,166 +1,102 @@
-"""Streamlit dashboard – v2.1  (Equity / DD / CAGR/DD / Sharpe heat‑map)."""
-
 from __future__ import annotations
-
-import os
-import subprocess
-import sys
-from datetime import datetime
-from pathlib import Path
-
+import io
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from forest.config import BacktestSettings
 from forest.backtest.engine import run_backtest
-from forest.backtest.grid import param_grid, run_grid
-from forest.backtest.risk import RiskManager
-from forest.utils.log import setup_logger
+from forest.backtest.grid import run_grid
 
-setup_logger("ERROR")
 
-# ---------- helpers --------------------------------------------------------
-def load_csv(file):  # small wrapper
-    return (
-        pd.read_csv(file, parse_dates=["time"])
-        .set_index("time")
-        .loc[:, ["open", "high", "low", "close"]]
-    )
+st.set_page_config(page_title="Forest 4.0 Dashboard", layout="wide")
+st.title("🌲 Forest 4.0 — Backtest & Grid")
 
-def metrics(eq: pd.Series):
-    dd = (eq.cummax() - eq) / eq.cummax()
-    return eq, dd
+def load_csv(uploaded) -> pd.DataFrame:
+    df = pd.read_csv(uploaded)
+    # heurystyka kolumn, oczekujemy: time, open, high, low, close [, volume]
+    time_col = "time" if "time" in df.columns else ("Date" if "Date" in df.columns else None)
+    if time_col:
+        df[time_col] = pd.to_datetime(df[time_col])
+        df = df.set_index(time_col).sort_index()
+    # ujednolicenie małych liter
+    ren = {c: c.lower() for c in df.columns}
+    df = df.rename(columns=ren)
+    return df
 
-def heatmap(df_grid: pd.DataFrame, metric: str, dd_lim: int):
-    params_df = df_grid["params"].apply(pd.Series)
-    df = pd.concat([params_df, df_grid[["equity_end", "max_dd", "rar", "sharpe"]]], axis=1)
+def draw_equity(equity: pd.Series):
+    fig = px.line(equity.reset_index(), x=equity.index.name or "index", y="equity", title="Equity")
+    st.plotly_chart(fig, use_container_width=True)
 
-    if metric == "equity_end":
-        df = df[df["max_dd"] <= dd_lim / 100]
+def draw_drawdown(equity: pd.Series):
+    dd = (equity / equity.cummax()) - 1.0
+    fig = px.area(dd.reset_index(), x=dd.index.name or "index", y=0, title="Drawdown")
+    st.plotly_chart(fig, use_container_width=True)
 
-    if df.empty:
-        st.warning("Brak danych do wyświetlenia.")
-        return
+tab1, tab2, tab3 = st.tabs(["Back-test", "Grid Runner", "Grid Heat-map"])
 
-    value = {
-        "equity_end": "equity_end",
-        "max_dd": "max_dd",
-        "rar": "rar",
-        "sharpe": "sharpe",
-    }[metric]
-    cmap = {
-        "equity_end": "YlGnBu",
-        "max_dd": "RdYlGn_r",
-        "rar": "PuBuGn",
-        "sharpe": "Blues",
-    }[metric]
-    txt_fmt = ".2s" if metric in ("equity_end", "rar") else ".2f"
+with tab1:
+    st.header("Pojedynczy back-test")
+    up = st.file_uploader("Wgraj CSV (OHLC)", type=["csv"])
+    fast = st.number_input("EMA fast", value=12, min_value=2, max_value=500, step=1)
+    slow = st.number_input("EMA slow", value=26, min_value=3, max_value=1000, step=1)
+    run = st.button("Run back-test")
+    if up and run:
+        df = load_csv(up)
+        cfg = BacktestSettings()
+        cfg.strategy.params = {"fast": int(fast), "slow": int(slow)}
+        strat = cfg.build_strategy()
+        res = run_backtest(df=df, strategy=strat, symbol=cfg.symbol, price_col=cfg.strategy.price_col,
+                           atr_period=cfg.atr_period, atr_multiple=cfg.atr_multiple)
+        c1, c2 = st.columns(2)
+        with c1:
+            draw_equity(res.equity)
+        with c2:
+            draw_drawdown(res.equity)
+        st.subheader("Metryki")
+        st.json(res.metrics)
+        st.subheader("Transakcje (head)")
+        st.dataframe(res.trades.head(20))
 
-    pivot = (
-        df.pivot(index="fast", columns="slow", values=value)
-        .sort_index(ascending=False)
-    )
-    title = {
-        "equity_end": f"Equity (DD ≤ {dd_lim} %)",
-        "max_dd": "Max DD %",
-        "rar": "CAGR / DD",
-        "sharpe": "Sharpe ratio",
-    }[metric]
+with tab2:
+    st.header("Grid Runner")
+    upg = st.file_uploader("Wgraj CSV (OHLC) do grida", type=["csv"], key="grid_csv")
+    c1, c2 = st.columns(2)
+    fast_min = c1.number_input("fast min", value=5)
+    fast_max = c1.number_input("fast max", value=30)
+    fast_step = c1.number_input("fast step", value=5)
+    slow_min = c2.number_input("slow min", value=30)
+    slow_max = c2.number_input("slow max", value=120)
+    slow_step = c2.number_input("slow step", value=10)
+    run_g = st.button("Run grid")
+    if upg and run_g:
+        df = load_csv(upg)
+        cfg = BacktestSettings()
+        ranges = {
+            "fast": range(int(fast_min), int(fast_max) + 1, int(fast_step)),
+            "slow": range(int(slow_min), int(slow_max) + 1, int(slow_step)),
+        }
+        results = run_grid(df, cfg, ranges)
+        st.success(f"Grid done: {len(results)} kombinacji.")
+        st.dataframe(results.head(50))
+        st.session_state["latest_grid"] = results
 
-    st.plotly_chart(
-        px.imshow(pivot, text_auto=txt_fmt, color_continuous_scale=cmap, title=title),
-        use_container_width=True,
-    )
+with tab3:
+    st.header("Heat-map")
+    src = st.radio("Źródło wyników", options=["Z ostatniego grida", "Wgraj plik CSV"])
+    df_res = None
+    if src == "Z ostatniego grida" and "latest_grid" in st.session_state:
+        df_res = st.session_state["latest_grid"]
+    else:
+        uph = st.file_uploader("Wgraj wyniki grida (CSV)", type=["csv"], key="heat_csv")
+        if uph:
+            df_res = pd.read_csv(uph)
 
-# ---------- Streamlit UI ---------------------------------------------------
-def app() -> None:
-    st.set_page_config(layout="wide")
-    tab_bt, tab_runner, tab_grid = st.tabs(
-        ["📈 Back‑test", "⚙️ Grid Runner", "🌡️ Grid Heat‑map"]
-    )
-
-    # 1. pojedynczy back‑test ----------------------------------------------
-    with tab_bt:
-        st.header("📈 Back‑test pojedynczy")
-        f = st.file_uploader("CSV OHLC", type="csv", key="bt")
-        if f:
-            df = load_csv(f)
-            fast = st.slider("EMA fast", 5, 50, 10)
-            slow = st.slider("EMA slow", 20, 100, 30, 5)
-            if slow <= fast:
-                st.error("slow musi być > fast")
-            elif st.button("Run back‑test"):
-                rm = RiskManager(capital=10_000)
-                res = run_backtest(df, rm, fast, slow)
-                eq, dd = metrics(res["equity"])
-                st.plotly_chart(px.line(eq, title="Equity"), use_container_width=True)
-                st.area_chart(dd, height=160, use_container_width=True)
-
-    # 2. Grid Runner --------------------------------------------------------
-    with tab_runner:
-        st.header("⚙️ Grid Runner")
-        gfile = st.file_uploader("CSV OHLC", type="csv", key="runner")
-        if gfile:
-            df_src = load_csv(gfile)
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                f_min = st.number_input("fast min", 5, 200, 5)
-                f_max = st.number_input("fast max", f_min + 1, 400, 25)
-                f_step = st.number_input("fast step", 1, 100, 5)
-            with c2:
-                s_min = st.number_input("slow min", f_min + 1, 400, 20)
-                s_max = st.number_input("slow max", s_min + 1, 600, 60)
-                s_step = st.number_input("slow step", 1, 100, 10)
-            with c3:
-                n_jobs = st.number_input("CPU (-1=all)", -1, 32, -1)
-                cache_on = st.checkbox("Use cache", True)
-
-            total = ((f_max - f_min) // f_step + 1) * ((s_max - s_min) // s_step + 1)
-            st.write(f"**Total combinations: {total}**")
-
-            if st.button("▶ Run grid"):
-                with st.spinner("Running grid…"):
-                    grid = param_grid(
-                        fast=range(f_min, f_max + 1, f_step),
-                        slow=range(s_min, s_max + 1, s_step),
-                    )
-                    res = run_grid(
-                        df_src,
-                        grid,
-                        make_risk=lambda: RiskManager(capital=10_000),
-                        n_jobs=n_jobs,
-                        use_cache=cache_on,
-                    )
-                    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                    out_path = Path("results") / f"grid_{ts}.parquet"
-                    out_path.parent.mkdir(exist_ok=True)
-                    res.to_parquet(out_path, index=False)
-                    st.success(f"Finished ✓  – saved to {out_path}")
-                    st.session_state["latest_grid"] = res
-
-            if "latest_grid" in st.session_state:
-                st.subheader("Heat‑mapa Equity")
-                heatmap(st.session_state["latest_grid"], "equity_end", 20)
-                st.download_button(
-                    "Download results (parquet)",
-                    st.session_state["latest_grid"].to_parquet(),
-                    file_name="grid_results.parquet",
-                )
-
-    # 3. Heat‑map zakładka --------------------------------------------------
-    with tab_grid:
-        st.header("🌡️ Wczytaj istniejące wyniki")
-        file2 = st.file_uploader("grid_results (.parquet / .csv)", type=["parquet", "csv"])
-        if file2:
-            gdf = pd.read_parquet(file2) if file2.name.endswith(".parquet") else pd.read_csv(file2)
-            metric = st.radio("Metryka", ["equity_end", "max_dd", "rar", "sharpe"], horizontal=True)
-            dd_lim = st.slider("Max DD % filter", 0, 50, 20) if metric == "equity_end" else 100
-            heatmap(gdf, metric, dd_lim)
-
-# ---------- CLI alias -------------------------------------------------------
-def main():
-    subprocess.run(["streamlit", "run", os.fspath(Path(__file__).resolve())] + sys.argv[1:], check=False)
-
-if __name__ == "__main__":
-    main()
+    metric = st.selectbox("Metryka", options=["equity_end", "max_dd", "cagr", "rar", "sharpe"])
+    if df_res is not None and {"fast", "slow", metric}.issubset(df_res.columns):
+        pivot = df_res.pivot_table(index="slow", columns="fast", values=metric, aggfunc="mean")
+        fig = px.imshow(pivot, origin="lower", aspect="auto", title=f"Heatmap: {metric}")
+        st.plotly_chart(fig, use_container_width=True)
+    elif df_res is not None:
+        st.warning("Wyniki nie zawierają kolumn fast/slow/wybranej metryki.")
 
