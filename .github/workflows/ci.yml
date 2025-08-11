@@ -36,7 +36,7 @@ jobs:
 
       # ⬇⬇⬇ najważniejsze: NIE instalujemy grupy dev (czyli nie instalujemy pre-commit)
       - name: Install project dependencies (main + ci)
-        run: poetry install --no-interaction --no-ansi --only main --with ci
+        run: poetry install --no-interaction --no-ansi --with ci --without dev
 
       # narzędzia CI doinstalowujemy przez pip (ruff, pytest, mypy)
       - name: Install CI tools
