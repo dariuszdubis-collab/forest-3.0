@@ -15,17 +15,22 @@ pandas-ta = "0.3.14b0"
 structlog = "^25.4.0"
 rich = "^14.1.0"
 streamlit = "^1.35.0"
-plotly     = "^5.22.0"
+plotly = "^5.22.0"
 tqdm = "^4.66.4"
 joblib = "^1.5.1"
 pydantic = ">=2.7,<3.0"
 pyyaml = ">=6.0.2,<7.0"
 
+# --- narzędzia tylko dla developerów lokalnie (NIE w CI) ---
 [tool.poetry.group.dev.dependencies]
+pre-commit = "^4.2.0"
+
+# --- narzędzia używane przez pipeline CI ---
+[tool.poetry.group.ci.dependencies]
 ruff = "^0.12.7"
 pytest = "^8.4.1"
 pytest-cov = "^6.2.1"
-pre-commit = "^4.2.0"
+mypy = "^1.10.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
@@ -34,7 +39,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-src = ["src"] 
+src = ["src"]
 
 [tool.ruff.lint]
 extend-select = ["I"]
@@ -44,4 +49,3 @@ known-first-party = ["forest"]
 
 [tool.poetry.scripts]
 forest-dashboard = "forest.dashboard.app:main"
-
