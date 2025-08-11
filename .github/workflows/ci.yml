@@ -25,7 +25,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install Poetry
         run: |
@@ -35,37 +34,22 @@ jobs:
       - name: Configure Poetry (no venv)
         run: poetry config virtualenvs.create false
 
-      - name: Cache Poetry downloads
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pypoetry
-          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-poetry-
+      # ⬇⬇⬇ najważniejsze: NIE instalujemy grupy dev (czyli nie instalujemy pre-commit)
+      - name: Install project dependencies (skip dev)
+        run: poetry install --no-interaction --no-ansi --without dev
 
-      - name: Install project dependencies
+      # narzędzia CI doinstalowujemy przez pip (ruff, pytest, mypy)
+      - name: Install CI tools
         run: |
-          if [ -f pyproject.toml ]; then
-            poetry install --no-interaction --no-ansi
-          elif [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            echo "No dependency file found"; exit 1
-          fi
+          pip install ruff pytest pytest-cov mypy
 
-      # 👉 NIE używamy pre-commit w CI (unikanie buga virtualenv).
-      #    Linty odpalamy bezpośrednio.
       - name: Lint (ruff)
-        run: |
-          poetry run python -m pip install ruff
-          poetry run ruff check .
+        run: ruff check .
 
       - name: Type check (mypy)
-        run: |
-          python -m pip install mypy
-          mypy --ignore-missing-imports --install-types --non-interactive src
+        run: mypy --ignore-missing-imports --install-types --non-interactive src
 
       - name: Run tests (pytest)
         env:
           PYTHONWARNINGS: ignore::DeprecationWarning
-        run: poetry run pytest -q
+        run: pytest -q
