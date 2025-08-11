@@ -1,151 +1,107 @@
-# src/forest/backtest/engine.py
 from __future__ import annotations
-
-from dataclasses import asdict, is_dataclass
-from typing import Any, Dict
-
+from typing import Optional, Dict, Any
 import numpy as np
 import pandas as pd
 
+from forest.results import BacktestResult
+from forest.strategy.base import Strategy
+from forest.utils.validate import ensure_backtest_ready
+from forest.utils.log import log
+from forest.backtest.tradebook import TradeBook, Trade
 from forest.backtest.risk import RiskManager
 from forest.backtest.trace import DecisionTrace
-from forest.backtest.tradebook import Trade, TradeBook
-from forest.core.indicators import atr, ema
-from forest.utils.log import log
-
-
-def ema_cross_strategy(
-    df: pd.DataFrame, fast: int = 12, slow: int = 26
-) -> pd.Series:
-    """
-    Prosta strategia: sygnał z przecięcia EMA(fast) i EMA(slow).
-    Zwraca serię {-1, 0, 1}.
-    """
-    f = ema(df["close"].values, fast)
-    s = ema(df["close"].values, slow)
-    sig = np.sign(f - s).astype(np.int32)
-    # Na początkowych NaN z EMA zwracamy 0
-    sig = np.where(np.isnan(f) | np.isnan(s), 0, sig)
-    return pd.Series(sig, index=df.index, name="signal")
-
-
-def _trace_to_payload(trace: DecisionTrace) -> Dict[str, Any]:
-    """Zamień DecisionTrace na dict niezależnie od implementacji."""
-    if hasattr(trace, "model_dump"):
-        try:
-            return trace.model_dump()  # Pydantic v2
-        except Exception:
-            pass
-    if hasattr(trace, "dict"):
-        try:
-            return trace.dict()  # Pydantic v1
-        except Exception:
-            pass
-    if is_dataclass(trace):
-        try:
-            return asdict(trace)
-        except Exception:
-            pass
-    # Fallback
-    return getattr(trace, "__dict__", {"time": None, "symbol": None, "filters": {}, "final": None})
+from forest.core.indicators import atr
 
 
 def run_backtest(
     df: pd.DataFrame,
-    risk: RiskManager,
-    fast: int = 12,
-    slow: int = 26,
-) -> pd.DataFrame:
+    strategy: Strategy,
+    risk: Optional[RiskManager] = None,
+    symbol: str = "SYMBOL",
+    price_col: str = "close",
+    atr_period: int = 14,
+    atr_multiple: float = 2.0,
+) -> BacktestResult:
     """
-    Uruchamia wektorowy back‑test na DF świec.
-
-    Zwraca kopię wejściowego DF z kolumnami:
-    - signal: -1/0/1 z ema_cross_strategy
-    - atr: ATR(14)
-    - equity: kapitał konta (mark‑to‑market, po domknięciu pozycji na końcu)
+    Główny backtest: data -> (strategy -> sygnały) -> egzekucja -> wynik.
     """
-    out = df.copy()
+    # 1) Sanity & przygotowanie danych
+    df = ensure_backtest_ready(df, price_col=price_col).copy()
+    # 2) Inicjalizacja strategii (obliczenia wektorowe)
+    df = strategy.init(df)
 
-    # 1) sygnał strategii
-    out["signal"] = ema_cross_strategy(out, fast=fast, slow=slow)
+    # ATR dla kontroli ryzyka / SL (opcjonalnie używany przez RiskManager)
+    atr_vals = atr(df["high"].to_numpy(), df["low"].to_numpy(), df[price_col].to_numpy(), length=atr_period)
+    df["_atr"] = atr_vals
 
-    # 2) ATR do position sizingu
-    out["atr"] = atr(out["high"].values, out["low"].values, out["close"].values, period=14)
-
+    # 3) Stan portfela / księga transakcji
     tb = TradeBook()
+    risk = risk or RiskManager()
+    equity_curve: list[float] = []
+    pos_qty = 0.0
+    entry_price = None  # dla śledzenia SL (opcjonalnie)
 
-    position: int | None = None  # 1 LONG, -1 SHORT, None = flat
-    entry_price: float | None = None
-    entry_qty: float | None = None
+    # 4) Pętla po świecach
+    for ts, row in df.iterrows():
+        price = float(row[price_col])
+        signal = strategy.on_bar(row)
 
-    for idx, row in out.iterrows():
-        sig = int(row.signal)
+        # trailing stop (opcjonalnie) – przykładowe użycie ATR
+        if pos_qty > 0 and np.isfinite(row["_atr"]):
+            risk.update_trailing_sl(entry_price=entry_price or price, atr=row["_atr"], atr_multiple=atr_multiple)
 
-        # ---------- trailing‑SL aktualizacja i ewentualne zamknięcie ----------
-        if position is not None:
-            risk.update_trailing_sl(float(row.close), float(row.atr))
-            if risk.hit_trailing_sl(float(row.close)):
-                pnl = (float(row.close) - float(entry_price)) * position * float(entry_qty)
-                cost = risk.position_cost(float(entry_qty), float(row.close))
-                risk.record_trade(pnl - cost)
-                tb.add(Trade(idx, float(row.close), float(entry_qty), "LONG" if position == 1 else "SHORT"))
-                log.warning("trailing_sl_hit", time=str(idx), price=float(row.close))
-                position = entry_price = entry_qty = None
-                # nie przerywamy — pozwalamy strategii dalej działać
+        action = signal.action
+        trace = DecisionTrace(
+            time=ts,
+            symbol=symbol,
+            filters={"atr_warmup": not np.isfinite(row["_atr"])},
+            final=action if action in ("BUY", "SELL") else "WAIT",
+        )
+        log.info("decision", **{
+            "time": str(ts), "symbol": symbol, "action": action, "reason": signal.reason or "", "price": price
+        })
 
-        # ---------- zmiana sygnału ⇒ zamknięcie starej + otwarcie nowej ----------
-        if sig != 0 and sig != position:
-            # zamknij starą pozycję (jeśli była)
-            if position is not None:
-                pnl = (float(row.close) - float(entry_price)) * position * float(entry_qty)
-                cost = risk.position_cost(float(entry_qty), float(row.close))
-                risk.record_trade(pnl - cost)
-                tb.add(Trade(idx, float(row.close), float(entry_qty), "LONG" if position == 1 else "SHORT"))
+        # SL trafiony?
+        if pos_qty > 0 and risk.hit_trailing_sl(price):
+            # zamknięcie pozycji
+            tb.add(Trade(time=ts, price=price, qty=pos_qty, side="SELL"))
+            risk.record_trade(entry=entry_price or price, exit=price, qty=pos_qty)
+            pos_qty = 0.0
+            entry_price = None
 
-            # otwórz nową pozycję
-            qty = risk.position_size(float(row.atr))
-            if qty == 0:
-                continue
+        # sygnał zmiany
+        if action == "BUY" and pos_qty == 0:
+            qty = risk.position_size(price=price, atr=row["_atr"])
+            if qty > 0:
+                tb.add(Trade(time=ts, price=price, qty=qty, side="BUY"))
+                pos_qty = qty
+                entry_price = price
+                risk.reset_trailing_sl(entry_price=entry_price, atr=row["_atr"], atr_multiple=atr_multiple)
 
-            position = 1 if sig > 0 else -1
-            entry_price = float(row.close)
-            entry_qty = float(qty)
+        elif action == "SELL" and pos_qty > 0:
+            tb.add(Trade(time=ts, price=price, qty=pos_qty, side="SELL"))
+            risk.record_trade(entry=entry_price or price, exit=price, qty=pos_qty)
+            pos_qty = 0.0
+            entry_price = None
 
-            trace = DecisionTrace(
-                time=str(idx),
-                symbol="SYN",
-                filters={"atr_ok": bool(qty > 0), "trailing_hit": False},
-                final="BUY" if position == 1 else "SELL",
-            )
-            log.info("decision", **_trace_to_payload(trace))
+        equity_curve.append(risk.equity)
 
-    # ---------- domknij ewentualnie otwartą pozycję na końcu ----------
-    if position is not None:
-        last_idx = out.index[-1]
-        last_close = float(out["close"].iloc[-1])
-        pnl = (last_close - float(entry_price)) * position * float(entry_qty)
-        cost = risk.position_cost(float(entry_qty), last_close)
-        risk.record_trade(pnl - cost)
-        tb.add(Trade(last_idx, last_close, float(entry_qty), "LONG" if position == 1 else "SHORT"))
-        position = entry_price = entry_qty = None
+        if risk.exceeded_max_dd():
+            log.warning("max_dd_exceeded", time=str(ts))
+            break
 
-    # ---------- zbuduj equity: dopasuj PnL z TradeBook do absolutnego equity z RiskManager ----------
-    final_equity = float(risk._equity_curve[-1]) if getattr(risk, "_equity_curve", None) else float(risk.capital)
+    # 5) Zamknij pozycję na końcu (jeśli otwarta)
+    if pos_qty > 0:
+        last_ts = df.index[-1]
+        last_price = float(df.iloc[-1][price_col])
+        tb.add(Trade(time=last_ts, price=last_price, qty=pos_qty, side="SELL"))
+        risk.record_trade(entry=entry_price or last_price, exit=last_price, qty=pos_qty)
+        pos_qty = 0.0
+        entry_price = None
+        equity_curve.append(risk.equity)
 
-    eq_pnl = tb.equity_curve()  # zazwyczaj seria PnL (cumulative), indeks po momentach transakcji
-    if eq_pnl is not None and len(eq_pnl) > 0:
-        eq_pnl = eq_pnl.astype(float)
-        # Usuń ewentualne duplikaty indeksu, zostaw ostatnią wartość
-        if eq_pnl.index.has_duplicates:
-            eq_pnl = eq_pnl[~eq_pnl.index.duplicated(keep="last")]
-
-        # Skoryguj stałą tak, aby ostatnia wartość serii == final_equity
-        shift = final_equity - float(eq_pnl.iloc[-1])
-        eq_abs = (eq_pnl + shift).reindex(out.index).ffill()
-        out["equity"] = eq_abs.astype(float)
-    else:
-        # Brak transakcji — wpisz płaską linię kapitału
-        out["equity"] = pd.Series(final_equity, index=out.index, dtype=float)
-
-    return out
+    # 6) Wyniki
+    equity = pd.Series(equity_curve, index=df.index[:len(equity_curve)], name="equity")
+    trades_df = tb.to_frame()
+    return BacktestResult.from_equity_and_trades(equity=equity, trades=trades_df)
 

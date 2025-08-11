@@ -1,0 +1,25 @@
+# --- Identyfikacja i dane ---
+symbol: "TEST"
+timeframe: "1h"   # zostanie znormalizowany (np. "H" -> "1h")
+
+# --- Strategia ---
+strategy:
+  name: "ema_cross"       # fabryka zbuduje EMACrossStrategy
+  params:
+    fast: 12
+    slow: 26
+  # price_col: "close"    # opcjonalnie; domyślnie "close"
+
+# --- Ryzyko i koszty ---
+risk:
+  initial_capital: 100000
+  risk_per_trade: 0.01      # 1% kapitału na trade
+  max_drawdown: 0.25        # przerwij, gdy DD >= 25%
+  fee_perc: 0.0005          # 5 bps prowizji
+  # UWAGA: spread_perc / slippage_perc jeśli chcesz dodać,
+  # dopisz je też w modelu RiskSettings w src/forest/config.py
+
+# --- ATR / trailing ---
+atr_period: 14
+atr_multiple: 2.0
+

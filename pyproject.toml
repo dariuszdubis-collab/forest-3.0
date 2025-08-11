@@ -21,11 +21,11 @@ joblib = "^1.5.1"
 pydantic = ">=2.7,<3.0"
 pyyaml = ">=6.0.2,<7.0"
 
-# --- narzędzia tylko dla developerów lokalnie (NIE w CI) ---
+# --- tylko lokalnie u devów ---
 [tool.poetry.group.dev.dependencies]
 pre-commit = "^4.2.0"
 
-# --- narzędzia używane przez pipeline CI ---
+# --- narzędzia dla CI ---
 [tool.poetry.group.ci.dependencies]
 ruff = "^0.12.7"
 pytest = "^8.4.1"
@@ -49,3 +49,4 @@ known-first-party = ["forest"]
 
 [tool.poetry.scripts]
 forest-dashboard = "forest.dashboard.app:main"
+
